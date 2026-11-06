@@ -1,0 +1,17 @@
+# Секреты: ключи GigaChat API не должны попадать в публичный репозиторий
+.env
+.env.*
+!.env.example
+
+# Кэш токенов и артефакты Python
+.cache/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# ОС и редакторы
+Thumbs.db
+.DS_Store
+.idea/
+.vscode/
