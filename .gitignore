@@ -14,6 +14,10 @@ venv/
 w1t3_*.json
 w1t3_*.csv
 
+# Результаты прогонов w1t4: там же
+w1t4_*.json
+w1t4_*.csv
+
 # ОС и редакторы
 Thumbs.db
 .DS_Store
