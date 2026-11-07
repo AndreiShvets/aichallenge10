@@ -10,6 +10,10 @@ __pycache__/
 .venv/
 venv/
 
+# Результаты прогонов w1t3: создаются рядом с tasks.json
+w1t3_*.json
+w1t3_*.csv
+
 # ОС и редакторы
 Thumbs.db
 .DS_Store
