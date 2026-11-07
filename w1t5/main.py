@@ -2,7 +2,7 @@
 
 Сценарий:
 1. читает задачи из tasks.json (по умолчанию — в корне проектов, на уровень выше);
-2. показывает модели, у которых в w1t5_prices.json заполнена группа (tier),
+2. показывает модели, у которых в ai_models_prices.json заполнена группа (tier),
    и раскладывает их на три класса;
 3. для каждого семейства с полным набором групп считает, во сколько раз
    вырастает цена от маленькой модели к флагманской;
@@ -44,7 +44,7 @@ PROJECT_DIR = Path(__file__).resolve().parent
 # Задачи и цены лежат в корне проектов, чтобы ими пользовались и следующие задачи.
 DEFAULT_TASKS_FILE = PROJECT_DIR.parent / "tasks.json"
 SHORT_TASKS_FILE = PROJECT_DIR.parent / "tasks_short.json"
-DEFAULT_PRICES_FILE = PROJECT_DIR.parent / "w1t5_prices.json"
+DEFAULT_PRICES_FILE = PROJECT_DIR.parent / "ai_models_prices.json"
 ENV_SEARCH_START = PROJECT_DIR
 
 # Классы моделей. Порядок — от дешёвой к дорогой.
