@@ -1,0 +1,130 @@
+{
+  "version": 1,
+  "description": "Цены моделей для w1t5. Для моделей шлюза Veai указаны официальные цены первоисточника в долларах за 1M токенов: сам Veai тарифицирует по минутам и тарифной сетки по моделям не имеет (https://veai.ru/tarifs), поэтому стоимость прогона считается по прайсу вендора модели. Для GigaChat указана цена пакета физлица в рублях за 1M токенов: в пакете входные и выходные токены считаются по одной ставке, поэтому rub_per_1m — единственная ставка.",
+  "usd_rub": 79.5,
+  "usd_rub_date": "2026-11-08",
+  "usd_rub_source": "Курс задаётся вручную: прогон не должен зависеть от доступности сервиса курсов. Обновите при расхождении с курсом ЦБ.",
+  "veai_minute_rub": {
+    "personal": 14.0,
+    "professional": 10.0,
+    "ultra": 8.33,
+    "flex": 14.29,
+    "source": "https://veai.ru/tarifs"
+  },
+  "models": {
+    "Anthropic/haiku-5.5": {
+      "vendor": "Anthropic",
+      "tier": "small",
+      "usd_in": 0.1,
+      "usd_out": 0.5,
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "checked": "2026-11-08"
+    },
+    "Anthropic/sonnet-5.5": {
+      "vendor": "Anthropic",
+      "tier": "medium",
+      "usd_in": 2.0,
+      "usd_out": 10.0,
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "checked": "2026-11-08"
+    },
+    "Anthropic/opus-5.5": {
+      "vendor": "Anthropic",
+      "tier": "flagship",
+      "usd_in": 4.0,
+      "usd_out": 20.0,
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "checked": "2026-11-08"
+    },
+    "OpenAI/gpt-6-luna": {
+      "vendor": "OpenAI",
+      "tier": "small",
+      "usd_in": 0.1,
+      "usd_out": 0.5,
+      "source": "https://benchlm.ai/openai/api-pricing",
+      "checked": "2026-11-08"
+    },
+    "OpenAI/gpt-6.1-sol": {
+      "vendor": "OpenAI",
+      "tier": "medium",
+      "usd_in": 2.0,
+      "usd_out": 10.0,
+      "source": "https://benchlm.ai/openai/api-pricing",
+      "checked": "2026-11-08"
+    },
+    "OpenAI/gpt-6-astra": {
+      "vendor": "OpenAI",
+      "tier": "flagship",
+      "usd_in": 10.0,
+      "usd_out": 50.0,
+      "source": "https://benchlm.ai/openai/api-pricing",
+      "checked": "2026-11-08"
+    },
+    "Google/gemini-3.5-flash-lite": {
+      "vendor": "Google",
+      "tier": "small",
+      "usd_in": 0.1,
+      "usd_out": 0.4,
+      "source": "https://benchlm.ai/google/api-pricing",
+      "checked": "2026-11-08"
+    },
+    "Google/gemini-3.8-flash": {
+      "vendor": "Google",
+      "tier": "medium",
+      "usd_in": 0.75,
+      "usd_out": 3.75,
+      "source": "https://benchlm.ai/google/api-pricing",
+      "checked": "2026-11-08"
+    },
+    "Google/gemini-4-argon": {
+      "vendor": "Google",
+      "tier": "flagship",
+      "usd_in": 2.0,
+      "usd_out": 10.0,
+      "source": "https://benchlm.ai/google/api-pricing",
+      "checked": "2026-11-08"
+    },
+    "GigaChat": {
+      "vendor": "GigaChat",
+      "tier": "small",
+      "rub_per_1m": 65.0,
+      "source": "https://developers.sber.ru/docs/ru/gigachat/tariffs/individual-tariffs",
+      "checked": "2026-11-08"
+    },
+    "GigaChat-2": {
+      "vendor": "GigaChat",
+      "tier": "small",
+      "rub_per_1m": 65.0,
+      "source": "https://developers.sber.ru/docs/ru/gigachat/tariffs/individual-tariffs",
+      "checked": "2026-11-08"
+    },
+    "GigaChat-2-Pro": {
+      "vendor": "GigaChat",
+      "tier": "medium",
+      "rub_per_1m": 500.0,
+      "source": "https://developers.sber.ru/docs/ru/gigachat/tariffs/individual-tariffs",
+      "checked": "2026-11-08"
+    },
+    "GigaChat-Pro": {
+      "vendor": "GigaChat",
+      "tier": "medium",
+      "rub_per_1m": 500.0,
+      "source": "https://developers.sber.ru/docs/ru/gigachat/tariffs/individual-tariffs",
+      "checked": "2026-11-08"
+    },
+    "GigaChat-2-Max": {
+      "vendor": "GigaChat",
+      "tier": "flagship",
+      "rub_per_1m": 650.0,
+      "source": "https://developers.sber.ru/docs/ru/gigachat/tariffs/individual-tariffs",
+      "checked": "2026-11-08"
+    },
+    "GigaChat-Max": {
+      "vendor": "GigaChat",
+      "tier": "flagship",
+      "rub_per_1m": 650.0,
+      "source": "https://developers.sber.ru/docs/ru/gigachat/tariffs/individual-tariffs",
+      "checked": "2026-11-08"
+    }
+  }
+}
