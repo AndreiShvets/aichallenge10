@@ -108,9 +108,14 @@ python .\w1t3\main.py
 | Провайдер | Пометка |
 |---|---|
 | GigaChat | все модели: `уровень рассуждений не влияет на ответ` (`reasoning_effort` принимается, но ответ не меняется) |
-| Veai | модели без `low`/`max` в `reasoning.supported_efforts` — сейчас это `Anthropic/haiku-4.5` и `Google/gemini-3.5-flash-lite` |
+| Veai — нет параметра | модели без `low`/`max` в `reasoning.supported_efforts` — сейчас это `Anthropic/haiku-4.5` и `Google/gemini-3.5-flash-lite` |
+| Veai — каталог врёт | модели, которые заявляют `max`, но отклоняют его с HTTP 400: `Qwen/qwen3.6-flash`, `Qwen/qwen3.7-max`, `Qwen/qwen3.7-plus`. Тест идёт с поправкой: максимальный уровень заменяется на `xhigh` |
 
-Остальные 33 модели Veai поддерживают оба уровня, поэтому у них пометки нет.
+Для последних важно: `supported_efforts` в каталоге обещает `max`, а API отвечает
+`Invalid request` — поэтому список проверенных моделей задан в константе
+`VEAI_EFFORT_REJECTED` (сверено запросами). На остальных 30 моделях `max` работает.
+Фактические значения `effort` печатаются перед прогоном и пишутся в `meta.reasoning_effort`
+файла JSON.
 
 ## Вывод
 

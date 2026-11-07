@@ -279,12 +279,44 @@ def chat_models(models: list[dict[str, Any]], provider: str) -> list[dict[str, A
     ]
 
 
+# Модели, которые каталог Veai рекламирует с уровнем max, но API отклоняет его с HTTP 400.
+# Каталог для этой серии Qwen возвращает supported_efforts с max, а реальный предел —
+# xhigh, поэтому список проверен запросами и задаётся здесь, а не угадывается по метаданным.
+VEAI_EFFORT_REJECTED = {
+    "Qwen/qwen3.6-flash": {"max"},
+    "Qwen/qwen3.7-max": {"max"},
+    "Qwen/qwen3.7-plus": {"max"},
+}
+# Порядок силы уровней Veai от самого глубокого к самому быстрому.
+VEAI_EFFORT_ORDER = ("max", "xhigh", "high", "medium", "low")
+
+
+def veai_efforts(model_id: str) -> dict[str, str]:
+    """Уровни теста в значения reasoning_effort с учётом того, что API реально принимает.
+
+    Если запрошенный уровень модель отклоняет (каталог врёт), берём ближайший
+    более слабый из работающих, чтобы прогон шёл, а не падал.
+    """
+    rejected = VEAI_EFFORT_REJECTED.get(model_id, set())
+    efforts: dict[str, str] = {}
+    for level, effort in VEAI_REASONING_EFFORT.items():
+        if effort not in rejected:
+            efforts[level] = effort
+            continue
+        start = VEAI_EFFORT_ORDER.index(effort)
+        efforts[level] = next(
+            (e for e in VEAI_EFFORT_ORDER[start + 1 :] if e not in rejected), effort
+        )
+    return efforts
+
+
 def reasoning_limitation(model: dict[str, Any], provider: str) -> str:
     """Почему на модели нельзя провести полноценный тест по уровню рассуждений.
 
     Пустая строка означает, что ограничений нет. Речь только о различии уровней:
     на GigaChat reasoning_effort принимается, но на ответ не влияет; у части
-    моделей Veai параметра нет вовсе, и оба уровня дают одинаковый запрос.
+    моделей Veai параметра нет вовсе, и оба уровня дают одинаковый запрос;
+    третьи заявляют уровень в каталоге, но отклоняют его с HTTP 400.
     """
     if provider == GIGACHAT_PROVIDER:
         return "уровень рассуждений не влияет на ответ"
@@ -292,6 +324,14 @@ def reasoning_limitation(model: dict[str, Any], provider: str) -> str:
     needed = set(VEAI_REASONING_EFFORT.values())
     if not needed.issubset(set(supported)):
         return "не поддерживает уровни рассуждений: оба уровня пойдут одним запросом"
+    model_id = str(model.get("id", ""))
+    rejected = VEAI_EFFORT_REJECTED.get(model_id)
+    if rejected:
+        actual = veai_efforts(model_id)[REASONING_LEVELS[-1]]
+        return (
+            f"уровень {'/'.join(sorted(rejected))} отклоняется API (HTTP 400), "
+            f"максимальный прогон пойдёт с {actual} вместо {'/'.join(sorted(rejected))}"
+        )
     return ""
 
 
@@ -408,11 +448,12 @@ def chat(
     gigachat: GigaChatClient,
     veai: VeaiClient,
     use_cache: bool,
+    veai_effort_map: dict[str, str] | None = None,
 ) -> ChatReply:
     effort = (
         GIGACHAT_REASONING_EFFORT[reasoning]
         if provider == GIGACHAT_PROVIDER
-        else VEAI_REASONING_EFFORT[reasoning]
+        else (veai_effort_map or VEAI_REASONING_EFFORT)[reasoning]
     )
     try:
         if provider == GIGACHAT_PROVIDER:
@@ -517,6 +558,12 @@ def run_task(
     use_cache: bool,
 ) -> list[RunResult]:
     results: list[RunResult] = []
+    # Для Veai берём уровни, которые API модели реально принимает.
+    effort_map = (
+        veai_efforts(model)
+        if provider == VEAI_PROVIDER
+        else dict(GIGACHAT_REASONING_EFFORT)
+    )
     total = len(REASONING_LEVELS) * len(METHODS)
     done = 0
     for reasoning in REASONING_LEVELS:
@@ -532,6 +579,7 @@ def run_task(
                 gigachat,
                 veai,
                 use_cache,
+                effort_map,
             )
             self_prompt = meta.content
             # Токены мета-запроса тоже тратятся, поэтому входят в ячейку способа.
@@ -564,7 +612,14 @@ def run_task(
             )
             try:
                 reply = chat(
-                    provider, model, prompt, reasoning, gigachat, veai, use_cache
+                    provider,
+                    model,
+                    prompt,
+                    reasoning,
+                    gigachat,
+                    veai,
+                    use_cache,
+                    effort_map,
                 )
             except AppError as exc:
                 elapsed = time.time() - started
@@ -578,9 +633,7 @@ def run_task(
                         False,
                         elapsed,
                         str(exc),
-                        GIGACHAT_REASONING_EFFORT[reasoning]
-                        if provider == GIGACHAT_PROVIDER
-                        else VEAI_REASONING_EFFORT[reasoning],
+                        effort_map[reasoning],
                     )
                 )
                 continue
@@ -1097,6 +1150,14 @@ def main() -> int:
                 "рассуждений на этой модели не показательны."
             )
         print("Уровни рассуждений: " + ", ".join(REASONING_LEVELS))
+        if provider == VEAI_PROVIDER:
+            # Показываем, с каким effort реально пойдёт каждый уровень.
+            shown = veai_efforts(model)
+            if dict(shown) != dict(VEAI_REASONING_EFFORT):
+                pairs = ", ".join(
+                    f"{level} → {shown[level]}" for level in REASONING_LEVELS
+                )
+                print(f"Уровни после поправки на ограничения API: {pairs}")
         started = time.time()
         results: list[RunResult] = []
         for index, task in enumerate(tasks, start=1):
@@ -1169,7 +1230,9 @@ def export_results(
             "reasoning_levels": list(REASONING_LEVELS),
             "reasoning_effort": {
                 GIGACHAT_PROVIDER: GIGACHAT_REASONING_EFFORT,
-                VEAI_PROVIDER: VEAI_REASONING_EFFORT,
+                VEAI_PROVIDER: veai_efforts(model)
+                if provider == VEAI_PROVIDER
+                else VEAI_REASONING_EFFORT,
             },
             "methods": [{"key": m.key, "title": m.title} for m in METHODS],
             "totals": {
