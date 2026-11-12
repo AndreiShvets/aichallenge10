@@ -1,11 +1,13 @@
 """Простой агент на GigaChat: модель сама выбирает инструмент под запрос.
 
 Сценарий:
-1. читает ключ GigaChat и список запросов (по умолчанию — три проверочных);
+1. читает ключ GigaChat и спрашивает запрос у пользователя;
 2. отправляет запрос модели вместе с описанием трёх инструментов;
 3. если модель просит вызвать инструмент, выполняет функцию локально, пишет
    вызов в журнал и возвращает результат модели;
-4. повторяет шаги 3–4, пока модель не ответит текстом, и печатает ответ.
+4. повторяет шаг 3, пока модель не ответит текстом, печатает ответ и сколько
+   раз за цикл понадобился каждый инструмент;
+5. спрашивает следующий запрос — до команды /exit.
 
 Инструменты — обычные функции: бросок кости, текущее время, перевод числа
 в шестнадцатеричную систему. Модель их не выполняет, она только просит
@@ -20,6 +22,7 @@ import os
 import random
 import sys
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -47,6 +50,8 @@ DEFAULT_LOG_FILE = PROJECT_DIR / "tool_calls.log"
 # Запросов на один вопрос. Агент с тремя инструментами укладывается в два шага;
 # лимит нужен, чтобы модель, зациклившаяся на вызовах, не тратила токены.
 MAX_STEPS = 6
+# Команда выхода из диалога.
+EXIT_COMMAND = "/exit"
 
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S %Z"
 SYSTEM_PROMPT = (
@@ -57,7 +62,8 @@ SYSTEM_PROMPT = (
 )
 
 # Три проверки агента: без инструментов, с одним и с двумя инструментами подряд.
-DEFAULT_QUERIES = (
+# На них сохранены выводы прошлого прогона и по ним проверяется работа диалога.
+EXAMPLE_QUERIES = (
     "Сколько будет 17 умножить на 23? Ответь одним числом.",
     "Брось игральную кость с 20 гранями и скажи, что выпало.",
     "Брось игральную кость с 8 гранями и переведи выпавшее число "
@@ -189,7 +195,6 @@ class AgentRun:
 @dataclass(frozen=True)
 class Options:
     env_path: Path
-    queries: list[str]
     model: str
     log_file: Path
     use_cache: bool
@@ -227,7 +232,6 @@ def ask(prompt: str) -> str:
 
 def parse_args(argv: list[str]) -> Options:
     env_path: Path | None = None
-    query: str | None = None
     model = DEFAULT_MODEL
     log_file = DEFAULT_LOG_FILE
     use_cache = True
@@ -236,34 +240,29 @@ def parse_args(argv: list[str]) -> Options:
         arg = args.pop(0)
         if arg == "--no-cache":
             use_cache = False
-        elif arg in ("--env", "--query", "--model", "--log"):
+        elif arg in ("--env", "--model", "--log"):
             if not args:
                 raise AppError(f"После {arg} требуется значение.")
             value = args.pop(0)
             if arg == "--env":
                 env_path = Path(value).expanduser()
-            elif arg == "--query":
-                query = value
             elif arg == "--model":
                 model = value
             else:
                 log_file = Path(value).expanduser()
         elif arg.startswith("--env="):
             env_path = Path(arg[len("--env=") :]).expanduser()
-        elif arg.startswith("--query="):
-            query = arg[len("--query=") :]
         elif arg.startswith("--model="):
             model = arg[len("--model=") :]
         elif arg.startswith("--log="):
             log_file = Path(arg[len("--log=") :]).expanduser()
         else:
             raise AppError(
-                f"Неизвестный аргумент: {arg}. Доступны: --env PATH, --query TEXT, "
+                f"Неизвестный аргумент: {arg}. Доступны: --env PATH, "
                 "--model NAME, --log PATH, --no-cache."
             )
-    queries = [query] if query else list(DEFAULT_QUERIES)
     return Options(
-        env_path or find_env_file(ENV_SEARCH_START), queries, model, log_file, use_cache
+        env_path or find_env_file(ENV_SEARCH_START), model, log_file, use_cache
     )
 
 
@@ -335,8 +334,13 @@ def run_agent(
     access_token: str,
     model: str,
     log_file: Path,
+    on_step: Callable[[Step, int], None] | None = None,
 ) -> AgentRun:
-    """Цикл агента: запрос → вызов инструментов → ответ, не больше MAX_STEPS шагов."""
+    """Цикл агента: запрос → вызов инструментов → ответ, не больше MAX_STEPS шагов.
+
+    on_step вызывается на каждый выполненный инструмент: по нему вызывающий
+    код показывает шаги по ходу работы, а не только после ответа.
+    """
     started = time.time()
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -388,6 +392,8 @@ def run_agent(
         else:
             step = call_tool(tool, raw_arguments, query, step_number, log_file)
         steps.append(step)
+        if on_step is not None:
+            on_step(step, step_number)
 
         messages.append(
             {"role": "assistant", "content": "", "function_call": function_call}
@@ -403,69 +409,41 @@ def run_agent(
     )
 
 
-def print_table(headers: tuple[str, ...], rows: list[tuple[str, ...]]) -> None:
-    widths = [len(h) for h in headers]
-    for row in rows:
-        for i, cell in enumerate(row):
-            widths[i] = max(widths[i], len(cell))
-    template = "  ".join(f"{{:<{w}}}" for w in widths)
-    print(template.format(*headers))
-    print(template.format(*("-" * w for w in widths)))
-    for row in rows:
-        print(template.format(*row))
+def print_event(step: Step, number: int) -> None:
+    """Строка о вызове инструмента по ходу цикла."""
+    print(
+        f"  шаг {number}: {step.tool}({_format_arguments(step.arguments)})"
+        f" → {'ошибка: ' if step.error else ''}{step.error or step.result}",
+        flush=True,
+    )
 
 
-def print_run(position: int, total: int, run: AgentRun) -> None:
-    print(f"\n[{position}/{total}] {run.query}")
+def print_answer(run: AgentRun) -> None:
+    """Ответ и сколько раз за цикл был использован каждый инструмент."""
     if not run.steps:
         print("  инструменты: не вызывались")
-    for number, step in enumerate(run.steps, start=1):
-        outcome = step.error or step.result
-        print(
-            f"  шаг {number}: {step.tool}({_format_arguments(step.arguments)})"
-            f" → {'ошибка: ' if step.error else ''}{outcome}"
-        )
     if run.answer:
-        print(f"  ответ: {run.answer}")
+        print(f"\nОтвет: {run.answer}")
     else:
-        print(f"  ответ: не получен за {MAX_STEPS} шагов")
+        print(f"\nОтвет: не получен за {MAX_STEPS} шагов")
+    counts = Counter(run.tools)
+    print("Использовано инструментов:")
+    for tool in TOOLS:
+        print(f"  {tool.name}: {counts.get(tool.name, 0)}")
+    other = sorted(set(counts) - {tool.name for tool in TOOLS})
+    for name in other:
+        print(f"  {name} (нет такого инструмента): {counts[name]}")
     print(
-        f"  время: {run.seconds:.1f} с, токены: {run.prompt_tokens} вход + "
+        f"Время: {run.seconds:.1f} с, токены: {run.prompt_tokens} вход + "
         f"{run.completion_tokens} выход"
     )
 
 
-def print_summary(runs: list[AgentRun]) -> None:
-    print("\n" + "=" * 78)
-    print("ИТОГ: какой запрос обошелся без инструментов, а какой вызвал их")
-    print("=" * 78)
-    rows: list[tuple[str, ...]] = []
-    for number, run in enumerate(runs, start=1):
-        rows.append((
-            str(number),
-            _shorten(run.query, 52),
-            str(len(run.steps)),
-            ", ".join(run.tools) or "—",
-            "да" if run.answer else "нет",
-        ))
-    print_table(("#", "Запрос", "Вызовов", "Инструменты", "Ответ"), rows)
-    # Три проверочных запроса идут первыми: ожидаемое число вызовов видно
-    # сразу, без чтения каждого блока.
-    expected = [0, 1, 2]
-    checks = min(len(runs), len(expected))
-    if checks:
-        print()
-    for number in range(1, checks + 1):
-        run, want = runs[number - 1], expected[number - 1]
-        mark = "+" if len(run.steps) == want else "−"
-        print(f"  {mark} запрос {number}: ожидалось вызовов {want}, "
-              f"получено {len(run.steps)}")
-    if len(runs) > checks:
-        print(f"  без сверки: запросы {checks + 1}–{len(runs)}")
-
-
-def _shorten(text: str, width: int) -> str:
-    return text if len(text) <= width else text[: width - 1] + "…"
+def print_help() -> None:
+    print(f"Введите запрос и нажмите Enter. {EXIT_COMMAND} — выход.")
+    print("Например:")
+    for query in EXAMPLE_QUERIES:
+        print(f"  {query}")
 
 
 def export(runs: list[AgentRun], options: Options, base: Path) -> tuple[Path, Path]:
@@ -552,7 +530,6 @@ def main() -> int:
         print(f"Модель: {options.model}")
         print("Инструменты: " + ", ".join(tool.name for tool in TOOLS))
         print(f"Журнал вызовов: {options.log_file}")
-        print(f"Запросов: {len(options.queries)}")
 
         access_token = client.get_access_token(options.use_cache)
     except AppError as exc:
@@ -563,28 +540,56 @@ def main() -> int:
         return 1
 
     runs: list[AgentRun] = []
-    for number, query in enumerate(options.queries, start=1):
+    print()
+    print_help()
+    while True:
+        try:
+            query = ask("\nЗапрос (или /exit): ")
+        except AppError as exc:
+            # Конец ввода (Ctrl+D, закрытый поток) — тот же выход, что и /exit.
+            print(f"\n{exc}")
+            break
+        if query.lower() == EXIT_COMMAND:
+            break
+        if not query:
+            continue
+
+        print("\nЦикл агента")
         try:
             run = run_agent(
-                query, client, access_token, options.model, options.log_file
+                query, client, access_token, options.model, options.log_file,
+                on_step=print_event,
             )
         except AppError as exc:
-            # Ошибка одного запроса не роняет прогон: она видна в отчёте,
-            # остальные запросы выполняются дальше.
-            print(f"\n[{number}/{len(options.queries)}] {query}")
+            # Отказ по одному запросу не закрывает диалог: причину видно сразу,
+            # а следующий запрос можно задать снова.
             print(f"  ошибка: {exc}")
-            runs.append(AgentRun(query, [], "", 0.0))
             continue
-        print_run(number, len(options.queries), run)
         runs.append(run)
+        print_answer(run)
 
-    print_summary(runs)
+    return finish(runs, options)
+
+
+def finish(runs: list[AgentRun], options: Options) -> int:
+    """Итог диалога: зафиксировать историю и попрощаться."""
+    print()
+    if not runs:
+        print("Запросов не было — сохранять нечего.")
+        return 0
+    counts: Counter[str] = Counter()
+    for run in runs:
+        counts.update(run.tools)
+    print(f"Запросов за сеанс: {len(runs)}")
+    print("Вызовов инструментов за сеанс:")
+    for tool in TOOLS:
+        print(f"  {tool.name}: {counts.get(tool.name, 0)}")
     try:
         json_path, csv_path = export(runs, options, "w2t1_" + options.model)
     except AppError as exc:
         print(f"Ошибка: {exc}", file=sys.stderr)
         return 1
-    print(f"\nРезультаты: {json_path.name}, {csv_path.name}")
+    print(f"Результаты: {json_path.name}, {csv_path.name}")
     print(f"Журнал вызовов: {options.log_file}")
     return 0
 
