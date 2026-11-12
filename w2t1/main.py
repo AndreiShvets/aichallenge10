@@ -32,6 +32,7 @@ from gigachat_client import (
     TOKEN_CACHE_FILE,
     GigaChatClient,
     GigaChatError,
+    HttpLogger,
     default_ca_cert_files,
 )
 
@@ -45,7 +46,10 @@ PROJECT_DIR = Path(__file__).resolve().parent
 ENV_SEARCH_START = PROJECT_DIR
 # Результаты пишутся в корень проектов, рядом с tasks.json.
 OUTPUT_DIR = PROJECT_DIR.parent
+# Журналы: вызовы инструментов и HTTP-обмены с GigaChat. Оба копятся между
+# запусками; в git не попадают — это результаты работы, а не исходники.
 DEFAULT_LOG_FILE = PROJECT_DIR / "tool_calls.log"
+DEFAULT_HTTP_LOG_FILE = PROJECT_DIR / "http.log"
 
 # Запросов на один вопрос. Агент с тремя инструментами укладывается в два шага;
 # лимит нужен, чтобы модель, зациклившаяся на вызовах, не тратила токены.
@@ -197,6 +201,7 @@ class Options:
     env_path: Path
     model: str
     log_file: Path
+    http_log_file: Path
     use_cache: bool
 
 
@@ -234,13 +239,14 @@ def parse_args(argv: list[str]) -> Options:
     env_path: Path | None = None
     model = DEFAULT_MODEL
     log_file = DEFAULT_LOG_FILE
+    http_log_file = DEFAULT_HTTP_LOG_FILE
     use_cache = True
     args = list(argv)
     while args:
         arg = args.pop(0)
         if arg == "--no-cache":
             use_cache = False
-        elif arg in ("--env", "--model", "--log"):
+        elif arg in ("--env", "--model", "--log", "--http-log"):
             if not args:
                 raise AppError(f"После {arg} требуется значение.")
             value = args.pop(0)
@@ -248,21 +254,26 @@ def parse_args(argv: list[str]) -> Options:
                 env_path = Path(value).expanduser()
             elif arg == "--model":
                 model = value
-            else:
+            elif arg == "--log":
                 log_file = Path(value).expanduser()
+            else:
+                http_log_file = Path(value).expanduser()
         elif arg.startswith("--env="):
             env_path = Path(arg[len("--env=") :]).expanduser()
         elif arg.startswith("--model="):
             model = arg[len("--model=") :]
         elif arg.startswith("--log="):
             log_file = Path(arg[len("--log=") :]).expanduser()
+        elif arg.startswith("--http-log="):
+            http_log_file = Path(arg[len("--http-log=") :]).expanduser()
         else:
             raise AppError(
                 f"Неизвестный аргумент: {arg}. Доступны: --env PATH, "
-                "--model NAME, --log PATH, --no-cache."
+                "--model NAME, --log PATH, --http-log PATH, --no-cache."
             )
     return Options(
-        env_path or find_env_file(ENV_SEARCH_START), model, log_file, use_cache
+        env_path or find_env_file(ENV_SEARCH_START), model, log_file,
+        http_log_file, use_cache,
     )
 
 
@@ -286,6 +297,54 @@ def log_call(entry: CallLogEntry, log_file: Path) -> None:
             stream.write(line + "\n")
     except OSError as exc:
         raise AppError(f"Не удалось записать журнал вызовов {log_file}: {exc}") from exc
+
+
+def http_logger(log_file: Path) -> HttpLogger:
+    """Создаёт логгер HTTP-обменов для клиента GigaChat.
+
+    В отличие от журнала инструментов, сбой записи не роняет запрос к API:
+    без лога ответ пользователю всё равно нужен. Предупреждение печатается
+    один раз, чтобы цикл агента не утонул в одинаковых строках.
+    """
+    warned = False
+
+    def log(entry: dict[str, Any]) -> None:
+        nonlocal warned
+        # Порядок полей в строке — порядок ключей этого словаря.
+        line = json.dumps({
+            "time": entry["time"],
+            "query_number": entry.get("query_number"),
+            "step": entry.get("step"),
+            "method": entry["method"],
+            "url": entry["url"],
+            "request_headers": entry["request_headers"],
+            "request_body": _parse_json(entry["request_body"]),
+            "status": entry["status"],
+            "response_body": _parse_json(entry["response_body"]),
+            "seconds": entry["seconds"],
+            "error": entry["error"],
+        }, ensure_ascii=False)
+        try:
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            with log_file.open("a", encoding="utf-8") as stream:
+                stream.write(line + "\n")
+        except OSError as exc:
+            if not warned:
+                warned = True
+                print(f"Предупреждение: не удалось записать {log_file}: {exc}",
+                      file=sys.stderr)
+
+    return log
+
+
+def _parse_json(text: str) -> Any:
+    """Тело для лога в виде объекта, если это JSON, иначе — строкой."""
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return text
 
 
 def call_tool(tool: Tool, arguments: dict[str, Any], query: str, step: int,
@@ -335,16 +394,20 @@ def run_agent(
     model: str,
     log_file: Path,
     on_step: Callable[[Step, int], None] | None = None,
+    context: tuple[int, str] = (0, ""),
 ) -> AgentRun:
     """Цикл агента: запрос → вызов инструментов → ответ, не больше MAX_STEPS шагов.
 
     on_step вызывается на каждый выполненный инструмент: по нему вызывающий
     код показывает шаги по ходу работы, а не только после ответа.
+    context — номер запроса в сеансе и текст запроса: они уходят в HTTP-лог,
+    чтобы в нём было видно, какой шаг какого диалога описывает строка.
     """
+    query_number, user_query = context
     started = time.time()
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": query},
+        {"role": "user", "content": user_query},
     ]
     steps: list[Step] = []
     prompt_tokens = completion_tokens = 0
@@ -355,6 +418,11 @@ def run_agent(
             "messages": messages,
             "functions": [tool.schema() for tool in TOOLS],
             "function_call": "auto",
+        }
+        client.log_context = {
+            "query_number": query_number,
+            "query": user_query,
+            "step": step_number,
         }
         try:
             response = client.chat_messages(access_token, body)
@@ -524,11 +592,13 @@ def main() -> int:
             scope=scope,
             ca_cert_files=default_ca_cert_files(),
             token_cache_file=TOKEN_CACHE_FILE,
+            http_logger=http_logger(options.http_log_file),
         )
 
         print(f"Ключи: {options.env_path}")
         print(f"Модель: {options.model}")
         print("Инструменты: " + ", ".join(tool.name for tool in TOOLS))
+        print(f"HTTP-лог: {options.http_log_file}")
         print(f"Журнал вызовов: {options.log_file}")
 
         access_token = client.get_access_token(options.use_cache)
@@ -540,6 +610,9 @@ def main() -> int:
         return 1
 
     runs: list[AgentRun] = []
+    # Номер запроса в сеансе: считается по всем введённым, включая закончившиеся
+    # ошибкой — в HTTP-логе номера должны идти подряд.
+    received = 0
     print()
     print_help()
     while True:
@@ -554,11 +627,12 @@ def main() -> int:
         if not query:
             continue
 
+        received += 1
         print("\nЦикл агента")
         try:
             run = run_agent(
                 query, client, access_token, options.model, options.log_file,
-                on_step=print_event,
+                on_step=print_event, context=(received, query),
             )
         except AppError as exc:
             # Отказ по одному запросу не закрывает диалог: причину видно сразу,
@@ -591,6 +665,7 @@ def finish(runs: list[AgentRun], options: Options) -> int:
         return 1
     print(f"Результаты: {json_path.name}, {csv_path.name}")
     print(f"Журнал вызовов: {options.log_file}")
+    print(f"HTTP-лог: {options.http_log_file}")
     return 0
 
 

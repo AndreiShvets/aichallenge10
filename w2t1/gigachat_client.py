@@ -15,6 +15,8 @@ import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +36,11 @@ class GigaChatError(RuntimeError):
     """Ошибка обращения к GigaChat API."""
 
 
+# Что записать о каждом HTTP-обмене: время, шаг, метод, URL, запрос, статус,
+# ответ. Пишется и успешный ответ, и ошибка HTTP, и отказ сети.
+HttpLogger = Callable[[dict[str, Any]], None]
+
+
 class GigaChatClient:
     def __init__(
         self,
@@ -42,12 +49,17 @@ class GigaChatClient:
         timeout: float = DEFAULT_TIMEOUT,
         ca_cert_files: tuple[Path, ...] = (),
         token_cache_file: Path | None = None,
+        http_logger: HttpLogger | None = None,
     ) -> None:
         self.credentials = credentials
         self.scope = scope
         self.timeout = timeout
         self.token_cache_file = token_cache_file
         self.token_source = "нет"
+        self.http_logger = http_logger
+        # Номер запроса в сеансе и шаг цикла, которые идут в HTTP-лог: по ним
+        # видно, какое сообщение какого диалога описывает строка.
+        self.log_context: dict[str, Any] | None = None
         self._ssl_context = _build_ssl_context(ca_cert_files)
 
     def get_access_token(self, use_cache: bool = True) -> str:
@@ -137,10 +149,20 @@ class GigaChatClient:
         """
         headers = {**_auth_headers(access_token), "Content-Type": "application/json"}
         url = f"{API_BASE_URL}/chat/completions"
-        return self._post_chat(url, headers, json.dumps(body, ensure_ascii=False).encode())
+        context = body.pop("context", None)
+        return self._post_chat(
+            url, headers, json.dumps(body, ensure_ascii=False).encode(), context
+        )
 
-    def _post_chat(self, url: str, headers: dict[str, str], body: bytes) -> dict[str, Any]:
-        return self._request(url, method="POST", headers=headers, data=body)
+    def _post_chat(
+        self,
+        url: str,
+        headers: dict[str, str],
+        body: bytes,
+        log_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return self._request(url, method="POST", headers=headers, data=body,
+                             log_context=log_context)
 
     def _request(
         self,
@@ -148,15 +170,21 @@ class GigaChatClient:
         method: str,
         headers: dict[str, str],
         data: bytes | None = None,
+        log_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         request = urllib.request.Request(url, data=data, method=method, headers=headers)
+        started = time.time()
         try:
             with urllib.request.urlopen(
                 request, timeout=self.timeout, context=self._ssl_context
             ) as response:
                 raw = response.read()
+                status = response.status
         except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", "replace").strip()
+            raw = exc.read()
+            detail = raw.decode("utf-8", "replace").strip()
+            self._log_http(method, url, headers, data, exc.code, raw,
+                           time.time() - started, log_context)
             hint = ""
             if exc.code == 401:
                 hint = " Проверьте ключ авторизации GIGACHAT_CREDENTIALS."
@@ -164,12 +192,80 @@ class GigaChatClient:
                 hint = f" Проверьте, что ключ выдан для scope {self.scope}."
             raise GigaChatError(f"HTTP {exc.code} при запросе {url}:{hint} {detail}") from exc
         except urllib.error.URLError as exc:
+            self._log_http(method, url, headers, data, None, b"",
+                           time.time() - started, log_context, str(exc.reason))
             raise GigaChatError(f"Не удалось подключиться к {url}: {exc.reason}") from exc
+        self._log_http(method, url, headers, data, status, raw, time.time() - started,
+                       log_context)
 
         try:
             return json.loads(raw)
         except json.JSONDecodeError as exc:
             raise GigaChatError(f"Ответ {url} не является JSON: {raw[:200]!r}") from exc
+
+    def _log_http(
+        self,
+        method: str,
+        url: str,
+        headers: dict[str, str],
+        data: bytes | None,
+        status: int | None,
+        raw: bytes,
+        seconds: float,
+        log_context: dict[str, Any] | None = None,
+        error: str = "",
+    ) -> None:
+        """Отдаёт обмен вызывающему коду, который решает, куда его записать.
+
+        Тело — как есть: вызов этого метода не должен ронять запрос к API,
+        поэтому телом занимается сам логгер.
+        """
+        if self.http_logger is None:
+            return
+        self.http_logger({
+            "time": datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z"),
+            **(self.log_context or {}),
+            **(log_context or {}),
+            "method": method,
+            "url": url,
+            "request_headers": _redact_headers(headers),
+            "request_body": _redact_body(data.decode("utf-8", "replace")) if data else "",
+            "status": status,
+            "response_body": _redact_body(raw.decode("utf-8", "replace")),
+            "seconds": round(seconds, 3),
+            "error": error,
+        })
+
+
+def _redact_headers(headers: dict[str, str]) -> dict[str, str]:
+    """Копия заголовков без секретов: токен нужен только в самом запросе."""
+    # Заголовок Basic в запросе авторизации — это и есть ключ GIGACHAT_CREDENTIALS.
+    return {
+        key: (
+            "<скрыт>"
+            if key.lower() == "authorization" and value.startswith("Basic ")
+            else "Bearer <скрыт>" if key.lower() == "authorization" else value
+        )
+        for key, value in headers.items()
+    }
+
+
+def _redact_body(text: str) -> str:
+    """Убирает из тела ответа выданный access_token.
+
+    Лог должен быть безопасно пересылать и хранить, а токен живёт 30 минут
+    и даёт доступ к API от имени ключа.
+    """
+    if not text:
+        return text
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return text
+    if isinstance(payload, dict) and "access_token" in payload:
+        payload["access_token"] = "<скрыт>"
+        return json.dumps(payload, ensure_ascii=False)
+    return text
 
 
 def _auth_headers(access_token: str) -> dict[str, str]:
