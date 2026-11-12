@@ -50,6 +50,9 @@ OUTPUT_DIR = PROJECT_DIR.parent
 # запусками; в git не попадают — это результаты работы, а не исходники.
 DEFAULT_LOG_FILE = PROJECT_DIR / "tool_calls.log"
 DEFAULT_HTTP_LOG_FILE = PROJECT_DIR / "http.log"
+# Отступ в JSON-записи HTTP-лога: один обмен читается глазами, вложенные
+# сообщения и тела ответов стоят на своих строках.
+HTTP_LOG_INDENT = 2
 
 # Запросов на один вопрос. Агент с тремя инструментами укладывается в два шага;
 # лимит нужен, чтобы модель, зациклившаяся на вызовах, не тратила токены.
@@ -310,8 +313,10 @@ def http_logger(log_file: Path) -> HttpLogger:
 
     def log(entry: dict[str, Any]) -> None:
         nonlocal warned
-        # Порядок полей в строке — порядок ключей этого словаря.
-        line = json.dumps({
+        # Один обмен — один JSON-объект с отступами: файл читается глазами
+        # (тела сообщений и ответов стоят на своих строках), но остаётся
+        # склеиваемым потоком объектов, а не одним массивом.
+        record = json.dumps({
             "time": entry["time"],
             "query_number": entry.get("query_number"),
             "step": entry.get("step"),
@@ -323,11 +328,11 @@ def http_logger(log_file: Path) -> HttpLogger:
             "response_body": _parse_json(entry["response_body"]),
             "seconds": entry["seconds"],
             "error": entry["error"],
-        }, ensure_ascii=False)
+        }, ensure_ascii=False, indent=HTTP_LOG_INDENT)
         try:
             log_file.parent.mkdir(parents=True, exist_ok=True)
             with log_file.open("a", encoding="utf-8") as stream:
-                stream.write(line + "\n")
+                stream.write(record + "\n")
         except OSError as exc:
             if not warned:
                 warned = True

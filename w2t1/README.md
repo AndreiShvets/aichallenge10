@@ -58,13 +58,57 @@
 с запросами, просьбами вызвать функцию и её результатами) и что она отвечала.
 
 ```json
-{"time": "2026-11-13 02:25:17 MSK", "query_number": 2, "step": 2,
- "method": "POST", "url": ".../api/v1/chat/completions",
- "request_headers": {"Authorization": "Bearer <скрыт>", ...},
- "request_body": {"model": "GigaChat", "messages": [ ... ], "functions": [ ... ], "function_call": "auto"},
- "status": 200, "response_body": {"choices": [{"message": {"function_call": {"name": "decimal_to_hex", "arguments": {"number": 2}}}}], "usage": { ... }},
- "seconds": 0.284, "error": ""}
+{
+  "time": "2026-11-13 02:30:33 MSK",
+  "query_number": 1,
+  "step": 1,
+  "method": "POST",
+  "url": "https://gigachat.devices.sberbank.ru/api/v1/chat/completions",
+  "request_headers": {
+    "Accept": "application/json",
+    "Authorization": "Bearer <скрыт>",
+    "Content-Type": "application/json"
+  },
+  "request_body": {
+    "model": "GigaChat",
+    "messages": [
+      {"role": "system", "content": "Ты агент с инструментами…"},
+      {"role": "user", "content": "Брось кость с 8 гранями…"}
+    ],
+    "functions": [
+      {"name": "roll_dice", "description": "Бросает игральную кость…", "parameters": {"…": "…"}},
+      "…"
+    ],
+    "function_call": "auto"
+  },
+  "status": 200,
+  "response_body": {
+    "choices": [
+      {
+        "message": {
+          "content": "",
+          "role": "assistant",
+          "function_call": {"name": "roll_dice", "arguments": {"sides": 8}}
+        },
+        "finish_reason": "function_call"
+      }
+    ],
+    "usage": {"prompt_tokens": 585, "completion_tokens": 25, "total_tokens": 610}
+  },
+  "seconds": 0.284,
+  "error": ""
+}
+{
+  "time": "…",
+  "step": 2,
+  "…": "следующий обмен — следующий объект"
+}
 ```
+
+Запись форматирована с отступами: один обмен — один `{ … }` со вложенным
+разбором на строки, а не одна длинная строка. Объекты идут друг за другом,
+без обрамляющего массива: файл можно читать глазами построчно и при этом
+разбирать как поток JSON (см. команду ниже).
 
 | Поле | Что значит |
 |---|---|
@@ -88,10 +132,15 @@
 разбором конкретного диалога стоит его очистить. Без авторизации (текущий
 токен взят из кэша) в логе будут только запросы `/chat/completions`.
 
-Чтобы быстро прочитать диалог одной командой:
+Чтобы быстро прочитать диалог, не открывая файл целиком:
 
 ```powershell
-python -c "import json;[print(e['query_number'], e['step'], e['response_body']['choices'][0]['message']) for e in map(json.loads, open('w2t1/http.log', encoding='utf-8')) if e['step']]"
+python -c "import json;d=json.JSONDecoder();t=open('w2t1/http.log',encoding='utf-8').read();p=0
+while p<len(t):
+ p+=(len(t[p:])-len(t[p:].lstrip()))
+ if p>=len(t): break
+ e,p=d.raw_decode(t,p);m=e['response_body']['choices'][0]['message'] if e['step'] else {}
+ print(e['query_number'],e['step'],m.get('function_call') or m.get('content'))"
 ```
 
 ## Прогон
