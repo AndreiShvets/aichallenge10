@@ -1,0 +1,17 @@
+.cache/
+__pycache__/
+
+# Журналы — результаты работы агента, а не исходники: копятся между запусками.
+tool_calls.log
+http.log
+# История разговора и сводки: состояние беседы, а не исходники.
+history.json
+history.json.*
+summary.json
+summary.json.*
+checks.json
+branches_*.json
+# Результаты сравнения «со сжатием / без сжатия».
+w2t5_checks.json
+w2t5_*.json
+w2t5_*.csv
