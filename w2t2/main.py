@@ -487,7 +487,9 @@ def run_agent(
             "step": step_number,
         }
         try:
-            response = client.chat_messages(access_token, body)
+            # Токен не передаём: клиент сам обновит его, если GigaChat
+            # ответит 401 после долгого простоя.
+            response = client.chat_messages(None, body)
         except GigaChatError as exc:
             raise AppError(f"GigaChat не ответил: {exc}") from exc
         sent, received = _tokens(response)

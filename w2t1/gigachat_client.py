@@ -61,6 +61,9 @@ class GigaChatClient:
         # видно, какое сообщение какого диалога описывает строка.
         self.log_context: dict[str, Any] | None = None
         self._ssl_context = _build_ssl_context(ca_cert_files)
+        # Текущий токен: его можно обновить повторной авторизацией, не таща
+        # строку токена через весь код задачи от main до запроса.
+        self.access_token: str | None = None
 
     def get_access_token(self, use_cache: bool = True) -> str:
         self.token_source = "новый"
@@ -68,8 +71,15 @@ class GigaChatClient:
             cached = _read_cached_token(self.token_cache_file, self.credentials, self.scope)
             if cached is not None:
                 self.token_source = "из кэша"
+                self.access_token = cached
                 return cached
-        return self._fetch_access_token()
+        self.access_token = self._fetch_access_token()
+        return self.access_token
+
+    def renew_access_token(self) -> str:
+        """Берёт новый токен без кэша: прежний GigaChat больше не принимает."""
+        self.access_token = self._fetch_access_token()
+        return self.access_token
 
     def _fetch_access_token(self) -> str:
         body = urllib.parse.urlencode({"scope": self.scope}).encode()
@@ -140,29 +150,55 @@ class GigaChatClient:
             body["reasoning_effort"] = reasoning_effort
         return self.chat_messages(access_token, body)
 
-    def chat_messages(self, access_token: str, body: dict[str, Any]) -> dict[str, Any]:
+    def chat_messages(self, access_token: str | None, body: dict[str, Any]) -> dict[str, Any]:
         """Отправляет готовое тело запроса /chat/completions.
 
         Нужен для диалога с функциями: там в теле не только модель и сообщения,
         но и массив functions и режим function_call, а история сообщений растёт
         после каждого вызова инструмента.
+
+        access_token можно не передавать: тогда берётся текущий токен клиента,
+        в том числе обновлённый после повторной авторизации.
         """
-        headers = {**_auth_headers(access_token), "Content-Type": "application/json"}
+        token = access_token or self.access_token
+        if not token:
+            token = self.get_access_token()
+        headers = {**_auth_headers(token), "Content-Type": "application/json"}
         url = f"{API_BASE_URL}/chat/completions"
         context = body.pop("context", None)
-        return self._post_chat(
-            url, headers, json.dumps(body, ensure_ascii=False).encode(), context
+        return self._request(
+            url, method="POST", headers=headers,
+            data=json.dumps(body, ensure_ascii=False).encode(),
+            log_context=context, retry_after_401=True,
         )
 
-    def _post_chat(
+    def _retry_with_new_token(
         self,
         url: str,
-        headers: dict[str, str],
-        body: bytes,
-        log_context: dict[str, Any] | None = None,
+        method: str,
+        data: bytes | None,
+        log_context: dict[str, Any] | None,
+        reason: str,
     ) -> dict[str, Any]:
-        return self._request(url, method="POST", headers=headers, data=body,
-                             log_context=log_context)
+        """Новый токен и один повтор запроса после отказа 401.
+
+        Кэш обещал, что токен жив, но сервер его уже не принимает — поэтому
+        новый токен берётся без кэша. Если и повтор ответит 401, это уже
+        не протухание, и ошибка дойдёт до вызывающего кода.
+        """
+        renewed = self.renew_access_token()
+        # Повторная авторизация попадает в лог диалога: без неё в http.log
+        # будет необъяснимый 401 и два одинаковых запроса подряд.
+        self._log_http(
+            "OP", "renew-access-token", {}, None, 200,
+            json.dumps({"reason": reason}, ensure_ascii=False).encode(),
+            0.0, log_context,
+        )
+        return self._request(
+            url, method=method,
+            headers={**_auth_headers(renewed), "Content-Type": "application/json"},
+            data=data, log_context=log_context,
+        )
 
     def _request(
         self,
@@ -171,6 +207,7 @@ class GigaChatClient:
         headers: dict[str, str],
         data: bytes | None = None,
         log_context: dict[str, Any] | None = None,
+        retry_after_401: bool = False,
     ) -> dict[str, Any]:
         request = urllib.request.Request(url, data=data, method=method, headers=headers)
         started = time.time()
@@ -185,6 +222,10 @@ class GigaChatClient:
             detail = raw.decode("utf-8", "replace").strip()
             self._log_http(method, url, headers, data, exc.code, raw,
                            time.time() - started, log_context)
+            if exc.code == 401 and retry_after_401:
+                # Кэш обещал, что токен жив, а сервер его уже не принимает:
+                # после долгого простоя токен истекает раньше обещанного.
+                return self._retry_with_new_token(url, method, data, log_context, detail)
             hint = ""
             if exc.code == 401:
                 hint = " Проверьте ключ авторизации GIGACHAT_CREDENTIALS."
