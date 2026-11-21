@@ -1,0 +1,19 @@
+.cache/
+__pycache__/
+
+# Журналы — результаты работы агента, а не исходники: копятся между запусками.
+tool_calls.log
+http.log
+# Три слоя памяти на диске: состояние беседы и задач, а не исходники.
+history.json
+history.json.*
+summary.json
+summary.json.*
+work.json
+long.json
+branches_*.json
+# Результаты опыта с очисткой слоёв.
+cleanup.json
+# Результаты прогонов в корне репозитория.
+w3t1_*.json
+w3t1_*.csv
