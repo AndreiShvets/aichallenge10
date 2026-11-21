@@ -46,6 +46,10 @@ w2t5_*.csv
 w3t1_*.json
 w3t1_*.csv
 
+# Результаты прогонов w3t2
+w3t2_*.json
+w3t2_*.csv
+
 # ОС и редакторы
 Thumbs.db
 .DS_Store

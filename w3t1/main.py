@@ -276,6 +276,7 @@ OPTION_HELP = (
     ("--log PATH", "другой журнал вызовов инструментов"),
     ("--http-log PATH", "другой HTTP-лог диалога с моделью"),
     ("--no-cache", "переавторизоваться, минуя кэш токена"),
+    ("--command-prefix", "раскрывать однозначные сокращения команд после Enter вместо Tab"),
 )
 
 # Инструмент, результат которого остаётся в истории как часть разговора: текст
@@ -1176,6 +1177,7 @@ class Options:
     rules_only: bool = False
     # Извлечённый факт убирается из истории: слои не дублируются.
     sync_short: bool = True
+    command_prefix: bool = False
 
     @property
     def compression(self) -> bool:
@@ -1425,6 +1427,56 @@ def ask(prompt: str) -> str:
         raise AppError("Ввод прерван: не получен запрос.") from exc
 
 
+COMMAND_NAMES = tuple(item[0].split()[0] for item in COMMAND_HELP)
+
+
+def resolve_command(query: str, prefix: bool) -> str:
+    if not query.startswith("/"):
+        return query
+    parts = query.split(None, 1)
+    token = parts[0].lower()
+    matches = [name for name in COMMAND_NAMES if name.startswith(token)]
+    if token in COMMAND_NAMES:
+        name = token
+    elif prefix and len(matches) == 1:
+        name = matches[0]
+    elif prefix and matches:
+        raise AppError("Неоднозначная команда: " + ", ".join(matches))
+    else:
+        raise AppError(f"Неизвестная команда: {parts[0]}. Введите /help для списка команд.")
+    return name + query[len(parts[0]):]
+
+
+def ask_command(prompt: str, prefix: bool) -> str:
+    if prefix:
+        return ask(prompt)
+    try:
+        import readline
+    except ImportError:
+        return ask(prompt)
+    previous = readline.get_completer()
+    delimiters = readline.get_completer_delims()
+
+    def complete(text: str, state: int) -> str | None:
+        line = readline.get_line_buffer()[:readline.get_endidx()]
+        words = line.split()
+        candidates = COMMAND_NAMES if len(words) == 1 and line.startswith("/") and not line[-1:].isspace() else ()
+        matches = [candidate for candidate in candidates if candidate.lower().startswith(text.lower())]
+        return matches[state] if state < len(matches) else None
+
+    try:
+        readline.set_completer_delims(" \t\n")
+        readline.set_completer(complete)
+        if "libedit" in (readline.__doc__ or ""):
+            readline.parse_and_bind("bind ^I rl_complete")
+        else:
+            readline.parse_and_bind("tab: complete")
+        return ask(prompt)
+    finally:
+        readline.set_completer(previous)
+        readline.set_completer_delims(delimiters)
+
+
 def parse_args(argv: list[str]) -> Options:
     env_path: Path | None = None
     provider = DEFAULT_PROVIDER
@@ -1446,10 +1498,13 @@ def parse_args(argv: list[str]) -> Options:
     extract = True
     rules_only = False
     sync_short = True
+    command_prefix = False
     args = list(argv)
     while args:
         arg = args.pop(0)
-        if arg == "--no-cache":
+        if arg == "--command-prefix":
+            command_prefix = True
+        elif arg == "--no-cache":
             use_cache = False
         elif arg == "--no-extract":
             extract = False
@@ -1565,7 +1620,7 @@ def parse_args(argv: list[str]) -> Options:
         env_path or find_env_file(ENV_SEARCH_START), provider, model, log_file,
         http_log_file, history_file, summary_file, work_file, long_file,
         use_cache, model_limit, keep_turns, compress_every, fill_words, strategy,
-        window, branches_file, extract, rules_only, sync_short,
+        window, branches_file, extract, rules_only, sync_short, command_prefix,
     )
 
 
@@ -3430,11 +3485,16 @@ def main() -> int:
         history = fill_history(history, options, client, access_token, runs, received)
     while True:
         try:
-            query = ask(f"\nЗапрос (или {EXIT_COMMAND}): ")
+            query = ask_command(f"\nЗапрос (или {EXIT_COMMAND}): ", options.command_prefix)
         except AppError as exc:
             # Конец ввода (Ctrl+D, закрытый поток) — тот же выход, что и /exit.
             print(f"\n{exc}")
             break
+        try:
+            query = resolve_command(query, options.command_prefix)
+        except AppError as exc:
+            print(f"Ошибка: {exc}", file=sys.stderr)
+            continue
         command = query.lower()
         if command == EXIT_COMMAND:
             break
