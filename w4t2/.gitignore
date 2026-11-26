@@ -1,0 +1,7 @@
+.cache/
+__pycache__/
+
+# Журналы и история — результаты работы агента, а не исходники.
+tool_calls.log
+http.log
+history.json
