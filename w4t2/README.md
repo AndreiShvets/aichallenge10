@@ -39,6 +39,7 @@ mock-трекера задач и подключаем его к агенту п
 
 ```powershell
 python .\w4t2\server.py --port 8765                  # в отдельном окне, оставить запущенным
+python .\w4t2\server.py --verbose                  # то же, но печатает запросы и ответы сервера
 python .\w4t2\main.py --list-tools                   # проверка связи, без модели
 python .\w4t2\main.py                                # интерактивно, смешанный набор
 python .\w4t2\main.py --mcp-url http://127.0.0.1:8765/mcp

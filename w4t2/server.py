@@ -5,13 +5,15 @@
 Сервер не хранит сессий: каждый запрос самодостаточен, а состояние трекера
 живёт в процессе сервера.
 
-Запуск: python server.py [--host 127.0.0.1] [--port 8765]
+Запуск: python server.py [--host 127.0.0.1] [--port 8765] [--verbose]
+--verbose печатает каждый полученный запрос и отправленный ответ.
 """
 
 from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 
@@ -171,7 +173,12 @@ def handle_message(tracker: Tracker, message: Any) -> dict[str, Any] | None:
     return rpc_error(request_id, METHOD_NOT_FOUND, f"Метод {method} не поддерживается")
 
 
-def make_handler(tracker: Tracker) -> type[BaseHTTPRequestHandler]:
+def _show(direction: str, text: str) -> None:
+    stamp = datetime.now().strftime("%H:%M:%S")
+    print(f"[{stamp}] {direction}\n{text}", flush=True)
+
+
+def make_handler(tracker: Tracker, verbose: bool = False) -> type[BaseHTTPRequestHandler]:
     class McpHandler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:  # noqa: N802 — имя задано http.server
             if self.path != MCP_PATH:
@@ -185,6 +192,8 @@ def make_handler(tracker: Tracker) -> type[BaseHTTPRequestHandler]:
                 self._send_json(413, rpc_error(None, INVALID_REQUEST, "Тело запроса неверной длины"))
                 return
             raw = self.rfile.read(length)
+            if verbose:
+                _show("← запрос", raw.decode("utf-8", errors="replace"))
             try:
                 message = json.loads(raw.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError):
@@ -192,6 +201,8 @@ def make_handler(tracker: Tracker) -> type[BaseHTTPRequestHandler]:
                 return
             response = handle_message(tracker, message)
             if response is None:
+                if verbose:
+                    _show("→ ответ HTTP 202", "(уведомление, тела нет)")
                 self.send_response(202)
                 self.send_header("Content-Length", "0")
                 self.end_headers()
@@ -200,6 +211,8 @@ def make_handler(tracker: Tracker) -> type[BaseHTTPRequestHandler]:
 
         def _send_json(self, status: int, payload: dict[str, Any]) -> None:
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            if verbose:
+                _show(f"→ ответ HTTP {status}", body.decode("utf-8"))
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -213,27 +226,36 @@ def make_handler(tracker: Tracker) -> type[BaseHTTPRequestHandler]:
     return McpHandler
 
 
-def serve(host: str, port: int, tracker: Tracker | None = None) -> ThreadingHTTPServer:
+def serve(host: str, port: int, tracker: Tracker | None = None,
+          verbose: bool = False) -> ThreadingHTTPServer:
     """Создаёт сервер, но не запускает его: вызывающий решает, когда крутить цикл."""
-    return ThreadingHTTPServer((host, port), make_handler(tracker or Tracker()))
+    return ThreadingHTTPServer((host, port), make_handler(tracker or Tracker(), verbose))
 
 
 def main(argv: list[str]) -> int:
-    host, port = "127.0.0.1", 8765
+    # Консоль Windows по умолчанию не в UTF-8: без этого кириллица в --verbose портится.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    host, port, verbose = "127.0.0.1", 8765, False
     args = list(argv)
     while args:
         arg = args.pop(0)
-        if arg in ("--host", "--port") and args:
+        if arg == "--verbose":
+            verbose = True
+        elif arg in ("--host", "--port") and args:
             value = args.pop(0)
             if arg == "--host":
                 host = value
             else:
                 port = int(value)
         else:
-            print(f"Неизвестный аргумент: {arg}", file=sys.stderr)
+            print(f"Неизвестный аргумент: {arg}. Доступны: --host, --port, --verbose",
+                  file=sys.stderr)
             return 1
-    httpd = serve(host, port)
+    httpd = serve(host, port, verbose=verbose)
     print(f"MCP mock-трекер слушает http://{host}:{httpd.server_address[1]}{MCP_PATH}")
+    if verbose:
+        print("Режим --verbose: печатаются полученные запросы и отправленные ответы.")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
