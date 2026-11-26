@@ -64,6 +64,7 @@ HTTP_LOG_INDENT = 2
 MAX_STEPS = 6
 EXIT_COMMAND = "/exit"
 CLEAR_COMMAND = "/clear"
+COMMAND_NAMES = (EXIT_COMMAND, CLEAR_COMMAND)
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S %Z"
 
 SYSTEM_PROMPT = (
@@ -222,6 +223,7 @@ class Options:
     mcp_url: str
     list_tools: bool
     print_request: bool
+    command_prefix: bool
 
 
 @dataclass(frozen=True)
@@ -282,6 +284,46 @@ def ask(prompt: str) -> str:
         raise AppError("Ввод прерван: не получен запрос.") from exc
 
 
+def ask_command(prompt: str) -> str:
+    """Ввод с Tab-дополнением команд. Без readline (например, Windows) — обычный ввод."""
+    try:
+        import readline
+    except ImportError:
+        return ask(prompt)
+    previous = readline.get_completer()
+    delimiters = readline.get_completer_delims()
+
+    def complete(text: str, state: int) -> str | None:
+        line = readline.get_line_buffer()[:readline.get_endidx()]
+        candidates = COMMAND_NAMES if line.startswith("/") and " " not in line else ()
+        matches = [name for name in candidates if name.startswith(text.lower())]
+        return matches[state] if state < len(matches) else None
+
+    try:
+        # Слэш не должен быть разделителем, иначе Tab дополняет без него.
+        readline.set_completer_delims(" \t\n")
+        readline.set_completer(complete)
+        if "libedit" in (readline.__doc__ or ""):
+            readline.parse_and_bind("bind ^I rl_complete")
+        else:
+            readline.parse_and_bind("tab: complete")
+        return ask(prompt)
+    finally:
+        readline.set_completer(previous)
+        readline.set_completer_delims(delimiters)
+
+
+def resolve_command(query: str, prefix: bool) -> str:
+    """С флагом --command-prefix сокращение команды раскрывается, если оно однозначно."""
+    lowered = query.lower()
+    if not prefix or not lowered.startswith("/") or lowered in COMMAND_NAMES:
+        return query
+    matches = [name for name in COMMAND_NAMES if name.startswith(lowered)]
+    if len(matches) > 1:
+        raise AppError("Неоднозначная команда: " + ", ".join(matches))
+    return matches[0] if matches else query
+
+
 def parse_args(argv: list[str]) -> Options:
     env_path: Path | None = None
     model = DEFAULT_MODEL
@@ -292,11 +334,14 @@ def parse_args(argv: list[str]) -> Options:
     use_cache = True
     list_tools = False
     print_request = False
+    command_prefix = False
     args = list(argv)
     while args:
         arg = args.pop(0)
         if arg == "--no-cache":
             use_cache = False
+        elif arg == "--command-prefix":
+            command_prefix = True
         elif arg == "--list-tools":
             list_tools = True
         elif arg == "--print-request":
@@ -334,12 +379,12 @@ def parse_args(argv: list[str]) -> Options:
             raise AppError(
                 f"Неизвестный аргумент: {arg}. Доступны: --env PATH, --model NAME, "
                 "--log PATH, --http-log PATH, --history PATH, --mcp-url URL, "
-                "--list-tools, --print-request, --no-cache."
+                "--list-tools, --print-request, --command-prefix, --no-cache."
             )
     return Options(
         env_path or find_env_file(ENV_SEARCH_START), model, log_file,
         http_log_file, history_file, use_cache, mcp_url, list_tools,
-        print_request,
+        print_request, command_prefix,
     )
 
 
@@ -870,11 +915,16 @@ def session(client: GigaChatClient, connection: McpConnection,
     print_help(history)
     while True:
         try:
-            query = ask("\nЗапрос (или /exit): ")
+            typed = ask_command("\nЗапрос (или /exit): ")
         except AppError as exc:
             # Конец ввода (Ctrl+D, закрытый поток) — тот же выход, что и /exit.
             print(f"\n{exc}")
             break
+        try:
+            query = resolve_command(typed, options.command_prefix)
+        except AppError as exc:
+            print(f"Ошибка: {exc}", file=sys.stderr)
+            continue
         command = query.lower()
         if command == EXIT_COMMAND:
             break
